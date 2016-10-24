@@ -46,10 +46,6 @@ object Common extends AutoPlugin {
     testOptions += Tests.Argument(TestFrameworks.JUnit, "-v", "-a"),
 
     libraryDependencies ++= Seq(
-      "com.typesafe.akka"      %% "akka-cluster"                        % AkkaVersion,
-      "com.typesafe.akka"      %% "akka-http-experimental"              % AkkaVersion,
-      "com.typesafe.akka"      %% "akka-http-spray-json-experimental"   % AkkaVersion,
-      "com.typesafe.akka"      %% "akka-http-testkit"                   % AkkaVersion   % "test",
       "com.typesafe.akka"      %% "akka-stream"                         % AkkaVersion,
       "com.typesafe.akka"      %% "akka-stream-testkit"                 % AkkaVersion   % "test",
       "org.scalatest"          %% "scalatest"                           % "2.2.6"       % "test" // ApacheV2

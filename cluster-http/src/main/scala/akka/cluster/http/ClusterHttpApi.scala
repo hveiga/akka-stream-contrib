@@ -1,7 +1,10 @@
+/*
+ * Copyright (C) 2016 Lightbend Inc. <http://www.lightbend.com>
+ */
 package akka.cluster.http
 
 import akka.actor.AddressFromURIString
-import akka.cluster.{Cluster, Member}
+import akka.cluster.{ Cluster, Member }
 import akka.http.scaladsl.Http
 import akka.http.scaladsl.server.Directives._
 import akka.http.scaladsl.marshallers.sprayjson.SprayJsonSupport
@@ -10,17 +13,21 @@ import akka.http.scaladsl.server.RouteResult
 import akka.stream.ActorMaterializer
 import spray.json._
 
-/**
-  * Created by hecortiz on 9/17/16.
-  */
+final case class ClusterUnreachableMember(node: String, observedBy: Seq[String])
+final case class ClusterMember(node: String, nodeUid: String, status: String, roles: Set[String])
+final case class ClusterMembers(selfNode: String, members: Set[ClusterMember], unreachable: Seq[ClusterUnreachableMember])
+final case class ClusterHttpApiMessage(message: String)
 
-case class ClusterUnreachableMember(node: String, observedBy: Seq[String])
+object ClusterHttpApiOperation extends Enumeration {
+  val DOWN, LEAVE, JOIN = Value
 
-case class ClusterMember(node: String, nodeUid: String, status: String, roles: Set[String])
-
-case class ClusterMembers(selfNode: String, members: Set[ClusterMember], unreachable: Seq[ClusterUnreachableMember])
-
-case class ClusterHttpApiMessage(message: String)
+  def find(name: String) = try {
+    Some(withName(name))
+  } catch {
+    case e: NoSuchElementException =>
+      None
+  }
+}
 
 trait ClusterHttpApiJsonProtocol extends SprayJsonSupport with DefaultJsonProtocol {
   implicit val clusterUnreachableMemberFormat = jsonFormat2(ClusterUnreachableMember)
@@ -37,62 +44,80 @@ trait ClusterHttpApiHelper extends ClusterHttpApiJsonProtocol {
 
 object ClusterHttpRoute extends ClusterHttpApiHelper {
 
-  def apply(cluster: Cluster) =
-    path("members") {
-      get {
+  private def routeGetMembers(cluster: Cluster) = {
+    get {
+      complete {
+        val members = cluster.readView.state.members.map(memberToClusterMember)
+
+        val unreachable = cluster.readView.reachability.observersGroupedByUnreachable.toSeq.sortBy(_._1).map {
+          case (subject, observers) ⇒
+            ClusterUnreachableMember(s"${subject.address}", observers.toSeq.sorted.map(m ⇒ s"${m.address}"))
+        }
+
+        ClusterMembers(s"${cluster.readView.selfAddress}", members, unreachable)
+      }
+    }
+  }
+
+  private def routePostMembers(cluster: Cluster) = {
+    post {
+      formField('address) { address ⇒
         complete {
-          val members = cluster.readView.state.members.map(memberToClusterMember)
-
-          val unreachable = cluster.readView.reachability.observersGroupedByUnreachable.toSeq.sortBy(_._1).map {
-            case (subject, observers) ⇒
-              ClusterUnreachableMember(s"${subject.address}", observers.toSeq.sorted.map(m ⇒ s"${m.address}"))
-          }
-
-          ClusterMembers(s"${cluster.readView.selfAddress}", members, unreachable)
+          cluster.join(AddressFromURIString(address))
+          ClusterHttpApiMessage("Operation executed")
         }
-      } ~
-        post {
-          formField('address) { address ⇒
-            complete {
-              cluster.join(AddressFromURIString(address))
-              ClusterHttpApiMessage("Operation executed")
-            }
-          }
-        }
-    } ~
-      path("members" / Segment) { member ⇒
-        get {
-          complete {
-            cluster.readView.members.find(m ⇒ s"${m.uniqueAddress.address}" == member).map(memberToClusterMember)
-          }
-        } ~
-          delete {
-            cluster.readView.members.find(m ⇒ s"${m.uniqueAddress.address}" == member) match {
-              case Some(m) =>
+      }
+    }
+  }
+
+  private def routeGetMember(cluster: Cluster, member: String) =
+    get {
+      complete {
+        cluster.readView.members.find(m ⇒ s"${m.uniqueAddress.address}" == member).map(memberToClusterMember)
+      }
+    }
+
+  private def routeDeleteMember(cluster: Cluster, member: String) =
+    delete {
+      cluster.readView.members.find(m ⇒ s"${m.uniqueAddress.address}" == member) match {
+        case Some(m) =>
+          cluster.leave(m.uniqueAddress.address)
+          complete(ClusterHttpApiMessage("Operation executed"))
+        case None =>
+          complete(StatusCodes.NotFound -> ClusterHttpApiMessage("Member not found"))
+      }
+    }
+
+  private def routePutMember(cluster: Cluster, member: String) =
+    put {
+      formField('operation) { operation =>
+        cluster.readView.members.find(m ⇒ s"${m.uniqueAddress.address}" == member) match {
+          case Some(m) =>
+            ClusterHttpApiOperation.find(operation.toUpperCase) match {
+              case Some(ClusterHttpApiOperation.DOWN) =>
+                cluster.down(m.uniqueAddress.address)
+                complete(ClusterHttpApiMessage("Operation executed"))
+              case Some(ClusterHttpApiOperation.LEAVE) =>
                 cluster.leave(m.uniqueAddress.address)
                 complete(ClusterHttpApiMessage("Operation executed"))
-              case None =>
-                complete(StatusCodes.NotFound -> ClusterHttpApiMessage("Member not found"))
+              case _ =>
+                complete(StatusCodes.NotFound -> ClusterHttpApiMessage("Operation not supported"))
             }
-          } ~
-          put {
-            formField('operation) { operation =>
-                cluster.readView.members.find(m ⇒ s"${m.uniqueAddress.address}" == member) match {
-                  case Some(m) =>
-                    operation.toUpperCase match {
-                      case "DOWN" =>
-                        cluster.down(m.uniqueAddress.address)
-                        complete(ClusterHttpApiMessage("Operation executed"))
-                      case _ =>
-                        complete(StatusCodes.NotFound -> ClusterHttpApiMessage("Operation not supported"))
-                    }
-                  case None =>
-                    complete(StatusCodes.NotFound -> ClusterHttpApiMessage("Member not found"))
-                }
-            }
-          }
+          case None =>
+            complete(StatusCodes.NotFound -> ClusterHttpApiMessage("Member not found"))
+        }
       }
+    }
 
+  def apply(cluster: Cluster) =
+    pathPrefix("members") {
+      pathEndOrSingleSlash {
+        routeGetMembers(cluster) ~ routePostMembers(cluster)
+      } ~
+        path(Remaining) { member ⇒
+          routeGetMember(cluster, member) ~ routeDeleteMember(cluster, member) ~ routePutMember(cluster, member)
+        }
+    }
 }
 
 private[akka] class ClusterHttpApi(cluster: Cluster) {
@@ -102,6 +127,6 @@ private[akka] class ClusterHttpApi(cluster: Cluster) {
 
   def create() = {
     val route = RouteResult.route2HandlerFlow(ClusterHttpRoute(cluster))
-    Http().bindAndHandle(route, "0.0.0.0", settings.httpApiPort)
+    Http().bindAndHandle(route, settings.httpApiHostname, settings.httpApiPort)
   }
 }
