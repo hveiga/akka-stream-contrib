@@ -4,7 +4,7 @@
 package akka.cluster.http
 
 import akka.actor.AddressFromURIString
-import akka.cluster.{ Cluster, Member }
+import akka.cluster.{Cluster, Member}
 import akka.http.scaladsl.Http
 import akka.http.scaladsl.server.Directives._
 import akka.http.scaladsl.marshallers.sprayjson.SprayJsonSupport
@@ -12,6 +12,8 @@ import akka.http.scaladsl.model.StatusCodes
 import akka.http.scaladsl.server.RouteResult
 import akka.stream.ActorMaterializer
 import spray.json._
+
+import scala.concurrent.Future
 
 final case class ClusterUnreachableMember(node: String, observedBy: Seq[String])
 final case class ClusterMember(node: String, nodeUid: String, status: String, roles: Set[String])
@@ -114,19 +116,29 @@ object ClusterHttpRoute extends ClusterHttpApiHelper {
       pathEndOrSingleSlash {
         routeGetMembers(cluster) ~ routePostMembers(cluster)
       } ~
-        path(Remaining) { member ⇒
-          routeGetMember(cluster, member) ~ routeDeleteMember(cluster, member) ~ routePutMember(cluster, member)
-        }
+      path(Remaining) { member ⇒
+        routeGetMember(cluster, member) ~ routeDeleteMember(cluster, member) ~ routePutMember(cluster, member)
+      }
     }
 }
 
-private[akka] class ClusterHttpApi(cluster: Cluster) {
+/**
+  * Class to instantiate an [[akka.cluster.http.ClusterHttpApi]] to
+  * provide an HTTP management interface for [[akka.cluster.Cluster]].
+  */
+class ClusterHttpApi(cluster: Cluster) {
   private val settings = new ClusterHttpApiSettings(cluster.system.settings.config)
-  implicit val system = cluster.system
-  implicit val materializer = ActorMaterializer()
+  private implicit val system = cluster.system
+  private implicit val materializer = ActorMaterializer()
 
-  def create() = {
+  private var bindingFuture : Future[Http.ServerBinding] = _
+
+  def start() = {
     val route = RouteResult.route2HandlerFlow(ClusterHttpRoute(cluster))
-    Http().bindAndHandle(route, settings.httpApiHostname, settings.httpApiPort)
+    bindingFuture = Http().bindAndHandle(route, settings.httpApiHostname, settings.httpApiPort)
+  }
+
+  def stop() = {
+    bindingFuture.flatMap(_.unbind())
   }
 }
